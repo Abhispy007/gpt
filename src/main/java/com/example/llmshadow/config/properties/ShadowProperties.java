@@ -18,6 +18,7 @@ public record ShadowProperties(
         @Valid @DefaultValue Queue queue,
         @Valid @DefaultValue Retry retry,
         @Valid @DefaultValue CircuitBreaker circuitBreaker,
+        @Valid @DefaultValue Backpressure backpressure,
         @Valid @DefaultValue Redaction redaction,
         @Valid @DefaultValue Executor executor) {
 
@@ -62,7 +63,11 @@ public record ShadowProperties(
 
             @DurationUnit(ChronoUnit.MILLIS)
             @DefaultValue("100")
-            Duration readTimeoutMs) {
+            Duration readTimeoutMs,
+
+            @DurationUnit(ChronoUnit.MILLIS)
+            @DefaultValue("30000")
+            Duration pendingIdleMs) {
     }
 
     public record Retry(
@@ -83,6 +88,19 @@ public record ShadowProperties(
             @DurationUnit(ChronoUnit.MILLIS)
             @DefaultValue("10000")
             Duration openDurationMs) {
+    }
+
+    public record Backpressure(
+            @Min(1)
+            @DefaultValue("10000")
+            long maxQueuedJobs,
+
+            @Min(1)
+            @DefaultValue("1000")
+            long maxOutboxJobs,
+
+            @DefaultValue("false")
+            boolean rejectWhenCandidateCircuitOpen) {
     }
 
     public record Redaction(

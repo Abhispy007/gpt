@@ -53,6 +53,14 @@ public class MismatchLogger {
         log.info("event=shadow_job_queued requestId={}", requestId);
     }
 
+    public void logShadowOutboxed(String requestId, String reason) {
+        log.warn("event=shadow_job_outboxed requestId={} reason={}", requestId, reason);
+    }
+
+    public void logShadowOutboxReplayed(String requestId) {
+        log.info("event=shadow_outbox_replayed requestId={}", requestId);
+    }
+
     public void logShadowDeadLettered(String requestId, String reason) {
         log.warn("event=shadow_dead_lettered requestId={} reason={}", requestId, reason);
     }

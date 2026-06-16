@@ -10,6 +10,8 @@ public interface ShadowJobQueue {
 
     void moveDueRetriesToQueue(int batchSize);
 
+    List<QueuedShadowJob> recoverStalePending(int batchSize);
+
     List<QueuedShadowJob> poll(int batchSize);
 
     void acknowledge(QueuedShadowJob job);
@@ -19,4 +21,10 @@ public interface ShadowJobQueue {
     void deadLetter(QueuedShadowJob job, String reason);
 
     void clear();
+
+    long queuedCount();
+
+    long retryCount();
+
+    long deadLetterCount();
 }

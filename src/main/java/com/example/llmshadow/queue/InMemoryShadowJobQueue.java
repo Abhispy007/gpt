@@ -44,6 +44,11 @@ public class InMemoryShadowJobQueue implements ShadowJobQueue {
     }
 
     @Override
+    public List<QueuedShadowJob> recoverStalePending(int batchSize) {
+        return List.of();
+    }
+
+    @Override
     public List<QueuedShadowJob> poll(int batchSize) {
         List<QueuedShadowJob> jobs = new ArrayList<>();
         for (int i = 0; i < batchSize; i++) {
@@ -84,6 +89,17 @@ public class InMemoryShadowJobQueue implements ShadowJobQueue {
         deadLetters.clear();
     }
 
+    @Override
+    public long queuedCount() {
+        return queue.size();
+    }
+
+    @Override
+    public long retryCount() {
+        return retryQueue.size();
+    }
+
+    @Override
     public long deadLetterCount() {
         return deadLetters.size();
     }

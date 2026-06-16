@@ -18,8 +18,13 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisStreamCommands;
+import org.springframework.data.redis.connection.RedisStreamCommands.XClaimOptions;
+import org.springframework.data.redis.connection.RedisStreamCommands.XPendingOptions;
+import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.PendingMessage;
+import org.springframework.data.redis.connection.stream.PendingMessages;
 import org.springframework.data.redis.connection.stream.ReadOffset;
 import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.connection.stream.StreamOffset;
@@ -44,6 +49,7 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
     private final String deadLetterStream;
     private final String retryZset;
     private final long readTimeoutMs;
+    private final Duration pendingIdle;
 
     public RedisShadowJobQueue(
             StringRedisTemplate redisTemplate,
@@ -58,6 +64,7 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
         this.deadLetterStream = queueProperties.deadLetterStream();
         this.retryZset = queueProperties.retryZset();
         this.readTimeoutMs = queueProperties.readTimeoutMs().toMillis();
+        this.pendingIdle = queueProperties.pendingIdleMs();
     }
 
     @PostConstruct
@@ -94,6 +101,44 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
             redisTemplate.opsForStream().add(streamKey, Map.of(PAYLOAD_FIELD, payloadJson));
             redisTemplate.opsForZSet().remove(retryZset, payloadJson);
         }
+    }
+
+    @Override
+    public List<QueuedShadowJob> recoverStalePending(int batchSize) {
+        return redisTemplate.execute((RedisCallback<List<QueuedShadowJob>>) connection -> {
+            byte[] rawKey = streamKey.getBytes(StandardCharsets.UTF_8);
+            RedisStreamCommands commands = connection.streamCommands();
+            PendingMessages pendingMessages = commands.xPending(
+                    rawKey,
+                    group,
+                    XPendingOptions.unbounded((long) batchSize));
+
+            if (pendingMessages == null || pendingMessages.isEmpty()) {
+                return List.of();
+            }
+
+            List<RecordId> staleIds = pendingMessages.stream()
+                    .filter(this::isStale)
+                    .map(PendingMessage::getId)
+                    .toList();
+            if (staleIds.isEmpty()) {
+                return List.of();
+            }
+
+            List<ByteRecord> claimed = commands.xClaim(
+                    rawKey,
+                    group,
+                    consumer,
+                    XClaimOptions.minIdle(pendingIdle).ids(staleIds));
+
+            if (claimed == null || claimed.isEmpty()) {
+                return List.of();
+            }
+
+            return claimed.stream()
+                    .map(this::toQueuedJob)
+                    .toList();
+        });
     }
 
     @Override
@@ -149,6 +194,24 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
         initializeGroup();
     }
 
+    @Override
+    public long queuedCount() {
+        Long count = redisTemplate.opsForStream().size(streamKey);
+        return count == null ? 0 : count;
+    }
+
+    @Override
+    public long retryCount() {
+        Long count = redisTemplate.opsForZSet().zCard(retryZset);
+        return count == null ? 0 : count;
+    }
+
+    @Override
+    public long deadLetterCount() {
+        Long count = redisTemplate.opsForStream().size(deadLetterStream);
+        return count == null ? 0 : count;
+    }
+
     private void addToStream(RedisShadowJobPayload payload) {
         redisTemplate.opsForStream().add(streamKey, Map.of(PAYLOAD_FIELD, writePayload(payload)));
     }
@@ -163,6 +226,30 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
                 payload.primaryRawResponse(),
                 payload.createdAt(),
                 payload.attempts());
+    }
+
+    private QueuedShadowJob toQueuedJob(ByteRecord record) {
+        byte[] payloadValue = payloadValue(record);
+        RedisShadowJobPayload payload = readPayload(new String(payloadValue, StandardCharsets.UTF_8));
+        return new QueuedShadowJob(
+                record.getId().getValue(),
+                payload.requestId(),
+                payload.request(),
+                payload.primaryRawResponse(),
+                payload.createdAt(),
+                payload.attempts());
+    }
+
+    private byte[] payloadValue(ByteRecord record) {
+        return record.getValue().entrySet().stream()
+                .filter(entry -> PAYLOAD_FIELD.equals(new String(entry.getKey(), StandardCharsets.UTF_8)))
+                .findFirst()
+                .map(Map.Entry::getValue)
+                .orElseThrow(() -> new IllegalStateException("Redis stream record is missing payload"));
+    }
+
+    private boolean isStale(PendingMessage pendingMessage) {
+        return pendingMessage.getElapsedTimeSinceLastDelivery().compareTo(pendingIdle) >= 0;
     }
 
     private String writePayload(RedisShadowJobPayload payload) {

@@ -3,11 +3,16 @@ package com.example.llmshadow.integration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.llmshadow.dto.TokenResponse;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -24,6 +29,9 @@ import org.springframework.http.ResponseEntity;
                 "shadow.queue.backend=memory"
         })
 class JwtAuthIntegrationTest {
+
+    @LocalServerPort
+    private int port;
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -56,9 +64,18 @@ class JwtAuthIntegrationTest {
     }
 
     @Test
-    void tokenEndpointRejectsMissingApiKey() {
-        ResponseEntity<String> response = restTemplate.postForEntity("/auth/token", HttpEntity.EMPTY, String.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    void tokenEndpointRejectsMissingApiKey() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/auth/token"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                request,
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
     }
 
     @Test

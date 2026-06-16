@@ -35,5 +35,15 @@ public class DatabaseInitializer implements InitializingBean {
                     updated_at TEXT
                 )
                 """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS shadow_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """);
     }
 }

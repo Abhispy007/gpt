@@ -149,13 +149,15 @@ Example metrics response:
   },
   "forceMismatch": true,
   "forceCandidateError": false,
-  "candidateDelayMs": 3000
+  "candidateDelayMs": 3000,
+  "stream": false
 }
 ```
 
 - `forceMismatch`: Candidate returns a different tier.
 - `forceCandidateError`: Candidate returns HTTP 500.
 - `candidateDelayMs`: Candidate sleeps before responding.
+- `stream`: rejected by default because this demo buffers complete JSON responses.
 
 ## Queue Design
 
@@ -207,8 +209,9 @@ Queue pieces:
 - Consumer group: `SHADOW_QUEUE_GROUP`
 - Delayed retries: Redis sorted set, configured by `SHADOW_QUEUE_RETRY_ZSET`
 - Dead letters: Redis Stream, configured by `SHADOW_QUEUE_DLQ`
+- Publish-failure buffer: SQLite `shadow_outbox` table, replayed by the scheduled queue drainer
 
-SQLite is not used as a queue. The old `shadow_jobs` table and repository are intentionally removed.
+SQLite is not used as the primary queue. Redis Streams remains the queue. SQLite only stores mismatches, metrics, and a small outbox buffer for the narrow case where Redis is unavailable when the Primary response has already been produced.
 
 ## Spring Boot Design
 
@@ -216,9 +219,39 @@ The code uses Spring-managed production patterns instead of hand-rolled wiring:
 
 - `@ConfigurationProperties` classes bind and validate app, queue, retry, SQLite, client, and executor settings.
 - `@EnableAsync` plus `@Async("shadowTaskExecutor")` runs shadow comparisons outside the request thread.
-- `SecurityFilterChain` owns stateless API-key protection for `/api/**`, `/mock/**`, and `/metrics`.
+- `SecurityFilterChain` owns stateless API key/JWT protection for `/api/**`, `/mock/**`, and `/metrics`.
 - `@CircuitBreaker(name = "candidate")` applies Resilience4j to the Candidate client through Spring AOP.
-- `FilterRegistrationBean` disables servlet auto-registration for the API-key filter so it runs only in the Spring Security chain.
+- `@RateLimiter(name = "proxy")` applies Resilience4j ingress rate limiting to `/api/proxy`.
+- `FilterRegistrationBean` disables servlet auto-registration for the auth filter so it runs only in the Spring Security chain.
+
+## Production Guardrails
+
+The app now adds guardrails for the main production risks around large payloads, overloaded queues, and Redis recovery:
+
+- `RequestSizeFilter` rejects large `Content-Length` requests before Jackson parses them.
+- `RequestValidationService` enforces prompt length, input JSON byte size, input JSON depth, and a rough token estimate.
+- `stream=true` is rejected; this app does not pretend to support real token streaming while still buffering responses.
+- Resilience4j `RateLimiter` returns HTTP `429` when `/api/proxy` exceeds the configured ingress rate.
+- `BackpressureService` returns HTTP `503` when Redis queue/retry backlog or SQLite outbox backlog is above configured thresholds.
+- Redis pending-message recovery claims stale pending stream entries with `XPENDING`/`XCLAIM`, which covers the crash-after-poll-before-ack case.
+- If Redis publish fails after Primary succeeds, the copied shadow job is saved to SQLite `shadow_outbox` and replayed later.
+
+Relevant defaults:
+
+```properties
+app.request-limits.max-body-bytes=1048576
+app.request-limits.max-prompt-chars=8000
+app.request-limits.max-input-json-bytes=262144
+app.request-limits.max-input-depth=24
+app.request-limits.max-estimated-tokens=12000
+
+resilience4j.ratelimiter.instances.proxy.limit-for-period=60
+resilience4j.ratelimiter.instances.proxy.limit-refresh-period=1s
+
+shadow.backpressure.max-queued-jobs=10000
+shadow.backpressure.max-outbox-jobs=1000
+shadow.queue.pending-idle-ms=30000
+```
 
 ## Retry And Circuit Breaker
 
@@ -329,6 +362,17 @@ SHADOW_QUEUE_STREAM=llm-shadow:shadow-jobs
 SHADOW_QUEUE_GROUP=llm-shadow-proxy
 SHADOW_QUEUE_DLQ=llm-shadow:shadow-jobs:dead-letter
 SHADOW_QUEUE_RETRY_ZSET=llm-shadow:shadow-jobs:retry
+SHADOW_QUEUE_PENDING_IDLE_MS=30000
+MAX_REQUEST_BODY_BYTES=1048576
+MAX_PROMPT_CHARS=8000
+MAX_INPUT_JSON_BYTES=262144
+MAX_INPUT_DEPTH=24
+MAX_ESTIMATED_TOKENS=12000
+PROXY_RATE_LIMIT_PER_PERIOD=60
+PROXY_RATE_LIMIT_REFRESH_PERIOD=1s
+SHADOW_BACKPRESSURE_MAX_QUEUED_JOBS=10000
+SHADOW_BACKPRESSURE_MAX_OUTBOX_JOBS=1000
+SHADOW_BACKPRESSURE_REJECT_WHEN_CANDIDATE_CIRCUIT_OPEN=false
 ```
 
 If `PRIMARY_URL` or `CANDIDATE_URL` are blank, the app uses the internal mock endpoints.
@@ -350,6 +394,10 @@ Recommended App Platform settings:
   - `JWT_ISSUER` (optional; default `llm-shadow-proxy`)
   - `REDIS_URL`
   - `SQLITE_PATH`
+  - optional `MAX_REQUEST_BODY_BYTES`
+  - optional `MAX_ESTIMATED_TOKENS`
+  - optional `PROXY_RATE_LIMIT_PER_PERIOD`
+  - optional `SHADOW_BACKPRESSURE_MAX_QUEUED_JOBS`
   - optional `PRIMARY_URL`
   - optional `CANDIDATE_URL`
 
@@ -404,3 +452,5 @@ mvn -B test
 - Resilience4j circuit breaker state is still in-memory per app instance. For multiple production instances, use gateway/service-mesh circuit breaking or an explicitly shared breaker state.
 - SQLite is fine for demo mismatch storage, but multi-instance production deployments should use a shared database.
 - API key auth remains supported for simple service-to-service access. JWT adds expiring Bearer tokens without removing API key support.
+- Real LLM token streaming is still not implemented. The app rejects `stream=true` by default and treats model responses as complete JSON documents.
+- Request token counting is an estimate based on payload size, not provider-specific tokenization.
