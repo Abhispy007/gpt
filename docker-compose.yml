@@ -1,0 +1,18 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  app:
+    build: .
+    depends_on:
+      - redis
+    ports:
+      - "8080:8080"
+    environment:
+      API_KEY: dev-secret
+      REDIS_URL: redis://redis:6379
+      SQLITE_PATH: /app/data/llm-shadow-proxy.sqlite
+    volumes:
+      - ./data:/app/data
