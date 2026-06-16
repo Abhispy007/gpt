@@ -1,16 +1,15 @@
 package com.example.llmshadow.service;
 
+import com.example.llmshadow.config.properties.ShadowProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -21,9 +20,9 @@ public class RedactionService {
 
     public RedactionService(
             ObjectMapper objectMapper,
-            @Value("${shadow.redaction.sensitive-keys:}") String sensitiveKeys) {
+            ShadowProperties shadowProperties) {
         this.objectMapper = objectMapper;
-        this.sensitiveKeys = Arrays.stream(sensitiveKeys.split(","))
+        this.sensitiveKeys = shadowProperties.redaction().sensitiveKeys().stream()
                 .map(String::trim)
                 .filter(key -> !key.isBlank())
                 .map(key -> key.toLowerCase(Locale.ROOT))

@@ -1,5 +1,6 @@
 package com.example.llmshadow.queue;
 
+import com.example.llmshadow.config.properties.ShadowProperties;
 import com.example.llmshadow.dto.LlmProxyRequest;
 import com.example.llmshadow.dto.ShadowComparisonJob;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -13,7 +14,6 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.RedisConnection;
@@ -48,20 +48,16 @@ public class RedisShadowJobQueue implements ShadowJobQueue {
     public RedisShadowJobQueue(
             StringRedisTemplate redisTemplate,
             ObjectMapper objectMapper,
-            @Value("${shadow.queue.stream-key}") String streamKey,
-            @Value("${shadow.queue.group}") String group,
-            @Value("${shadow.queue.consumer}") String consumer,
-            @Value("${shadow.queue.dead-letter-stream}") String deadLetterStream,
-            @Value("${shadow.queue.retry-zset}") String retryZset,
-            @Value("${shadow.queue.read-timeout-ms:100}") long readTimeoutMs) {
+            ShadowProperties shadowProperties) {
+        ShadowProperties.Queue queueProperties = shadowProperties.queue();
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
-        this.streamKey = streamKey;
-        this.group = group;
-        this.consumer = consumer;
-        this.deadLetterStream = deadLetterStream;
-        this.retryZset = retryZset;
-        this.readTimeoutMs = readTimeoutMs;
+        this.streamKey = queueProperties.streamKey();
+        this.group = queueProperties.group();
+        this.consumer = queueProperties.consumer();
+        this.deadLetterStream = queueProperties.deadLetterStream();
+        this.retryZset = queueProperties.retryZset();
+        this.readTimeoutMs = queueProperties.readTimeoutMs().toMillis();
     }
 
     @PostConstruct

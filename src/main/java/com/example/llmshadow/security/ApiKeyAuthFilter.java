@@ -1,11 +1,16 @@
 package com.example.llmshadow.security;
 
+import com.example.llmshadow.config.properties.AppProperties;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import org.springframework.beans.factory.annotation.Value;
+import java.util.List;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -15,10 +20,15 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     private static final String API_KEY_HEADER = "X-API-Key";
 
-    private final String apiKey;
+    private final AppProperties appProperties;
 
-    public ApiKeyAuthFilter(@Value("${app.auth.api-key:}") String apiKey) {
-        this.apiKey = apiKey;
+    public ApiKeyAuthFilter(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
+
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        return !StringUtils.hasText(configuredApiKey()) || !isProtectedPath(request.getRequestURI());
     }
 
     @Override
@@ -27,14 +37,14 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
             HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
 
-        if (!StringUtils.hasText(apiKey) || !isProtectedPath(request.getRequestURI())) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
         String providedApiKey = request.getHeader(API_KEY_HEADER);
-        if (apiKey.equals(providedApiKey)) {
-            filterChain.doFilter(request, response);
+        if (configuredApiKey().equals(providedApiKey)) {
+            authenticate(providedApiKey);
+            try {
+                filterChain.doFilter(request, response);
+            } finally {
+                SecurityContextHolder.clearContext();
+            }
             return;
         }
 
@@ -44,6 +54,24 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
     }
 
     private boolean isProtectedPath(String path) {
-        return path.startsWith("/api/") || path.startsWith("/mock/");
+        return path.startsWith("/api/")
+                || path.startsWith("/mock/")
+                || path.equals("/metrics")
+                || path.startsWith("/metrics/");
+    }
+
+    private void authenticate(String apiKey) {
+        UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
+                "api-key-client",
+                apiKey,
+                List.of(new SimpleGrantedAuthority("ROLE_API_CLIENT")));
+
+        SecurityContext securityContext = SecurityContextHolder.createEmptyContext();
+        securityContext.setAuthentication(authentication);
+        SecurityContextHolder.setContext(securityContext);
+    }
+
+    private String configuredApiKey() {
+        return appProperties.auth().apiKey();
     }
 }

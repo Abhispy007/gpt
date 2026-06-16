@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.example.llmshadow.persistence.MismatchRepository;
+import com.example.llmshadow.persistence.ShadowMetricsRepository;
+import com.example.llmshadow.persistence.ShadowMetricsSnapshot;
 import com.example.llmshadow.queue.InMemoryShadowJobQueue;
 import java.io.OutputStream;
 import java.net.Socket;
@@ -29,8 +31,7 @@ import org.springframework.http.ResponseEntity;
                 "shadow.retry.backoff-ms=100",
                 "shadow.retry.max-attempts=1",
                 "shadow.queue.backend=memory",
-                "shadow.queue.poll-delay-ms=50",
-                "shadow.circuit-breaker.enabled=false"
+                "shadow.queue.poll-delay-ms=50"
         })
 class ProxyControllerIntegrationTest {
 
@@ -44,11 +45,15 @@ class ProxyControllerIntegrationTest {
     private MismatchRepository mismatchRepository;
 
     @Autowired
+    private ShadowMetricsRepository shadowMetricsRepository;
+
+    @Autowired
     private InMemoryShadowJobQueue shadowJobQueue;
 
     @BeforeEach
     void cleanDatabase() {
         mismatchRepository.deleteAll();
+        shadowMetricsRepository.reset();
         shadowJobQueue.clear();
     }
 
@@ -100,6 +105,35 @@ class ProxyControllerIntegrationTest {
         assertThat(response.getBody()).contains("\"tier\":\"gold\"");
         await().atMost(2, TimeUnit.SECONDS)
                 .untilAsserted(() -> assertThat(mismatchRepository.count()).isEqualTo(1));
+    }
+
+    @Test
+    void metricsEndpointReportsCurrentMatchRate() {
+        Map<String, Object> matchingRequest = Map.of(
+                "prompt", "Return customer tier",
+                "input", Map.of("customerId", "metrics-match"));
+        Map<String, Object> mismatchingRequest = Map.of(
+                "prompt", "Return customer tier",
+                "input", Map.of("customerId", "metrics-mismatch"),
+                "forceMismatch", true);
+
+        restTemplate.postForEntity("/api/proxy", matchingRequest, String.class);
+        restTemplate.postForEntity("/api/proxy", mismatchingRequest, String.class);
+
+        await().atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> {
+                    ResponseEntity<ShadowMetricsSnapshot> response = restTemplate.getForEntity(
+                            "/metrics",
+                            ShadowMetricsSnapshot.class);
+
+                    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+                    assertThat(response.getBody()).isNotNull();
+                    assertThat(response.getBody().totalComparisons()).isEqualTo(2);
+                    assertThat(response.getBody().matches()).isEqualTo(1);
+                    assertThat(response.getBody().mismatches()).isEqualTo(1);
+                    assertThat(response.getBody().matchRatePercentage()).isEqualTo(50.0);
+                    assertThat(response.getBody().updatedAt()).isNotBlank();
+                });
     }
 
     @Test

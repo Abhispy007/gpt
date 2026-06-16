@@ -26,5 +26,14 @@ public class DatabaseInitializer implements InitializingBean {
                     created_at TEXT NOT NULL
                 )
                 """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS shadow_metrics (
+                    id INTEGER PRIMARY KEY,
+                    total_comparisons INTEGER NOT NULL DEFAULT 0,
+                    mismatch_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT
+                )
+                """);
     }
 }

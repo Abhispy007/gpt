@@ -25,7 +25,6 @@ import org.springframework.http.ResponseEntity;
                 "shadow.queue.poll-delay-ms=50",
                 "shadow.retry.backoff-ms=1000",
                 "shadow.retry.max-attempts=5",
-                "shadow.circuit-breaker.enabled=true",
                 "shadow.circuit-breaker.failure-threshold=2",
                 "shadow.circuit-breaker.open-duration-ms=5000"
         })

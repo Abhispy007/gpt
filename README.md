@@ -15,8 +15,9 @@ flowchart LR
 
   Proxy --> Queue["Redis Stream shadow queue"]
   Queue --> Worker["Scheduled queue drain"]
-  Worker --> Executor["ThreadPoolTaskExecutor"]
-  Executor --> Candidate["Candidate LLM"]
+  Worker --> Async["@Async ShadowJobProcessor"]
+  Async --> Executor["shadowTaskExecutor"]
+  Executor --> Candidate["Candidate LLM @CircuitBreaker"]
   Candidate --> Compare["JSON Extract + Compare"]
   Compare -->|Mismatch| Store["SQLite mismatches"]
   Compare -->|Mismatch| Logs["Redacted Logs"]
@@ -30,6 +31,7 @@ flowchart LR
 ```text
 POST /api/proxy
 GET  /api/mismatches
+GET  /metrics
 POST /mock/primary
 POST /mock/candidate
 GET  /actuator/health
@@ -78,6 +80,25 @@ Then inspect persisted mismatches:
 ```bash
 curl -s http://localhost:8080/api/mismatches \
   -H 'X-API-Key: dev-secret'
+```
+
+And check the live shadow match rate:
+
+```bash
+curl -s http://localhost:8080/metrics \
+  -H 'X-API-Key: dev-secret'
+```
+
+Example metrics response:
+
+```json
+{
+  "totalComparisons": 2,
+  "matches": 1,
+  "mismatches": 1,
+  "matchRatePercentage": 50.0,
+  "updatedAt": "2026-06-16T18:30:00.000000Z"
+}
 ```
 
 ## Shadow Test Controls
@@ -151,6 +172,16 @@ Queue pieces:
 
 SQLite is not used as a queue. The old `shadow_jobs` table and repository are intentionally removed.
 
+## Spring Boot Design
+
+The code uses Spring-managed production patterns instead of hand-rolled wiring:
+
+- `@ConfigurationProperties` classes bind and validate app, queue, retry, SQLite, client, and executor settings.
+- `@EnableAsync` plus `@Async("shadowTaskExecutor")` runs shadow comparisons outside the request thread.
+- `SecurityFilterChain` owns stateless API-key protection for `/api/**`, `/mock/**`, and `/metrics`.
+- `@CircuitBreaker(name = "candidate")` applies Resilience4j to the Candidate client through Spring AOP.
+- `FilterRegistrationBean` disables servlet auto-registration for the API-key filter so it runs only in the Spring Security chain.
+
 ## Retry And Circuit Breaker
 
 Candidate failures do not affect the Primary response. Failed shadow jobs retry through Redis:
@@ -163,7 +194,6 @@ shadow.retry.backoff-ms=1000
 Candidate calls are protected with a Resilience4j circuit breaker named `candidate`. The assignment-facing settings are:
 
 ```properties
-shadow.circuit-breaker.enabled=true
 shadow.circuit-breaker.failure-threshold=3
 shadow.circuit-breaker.open-duration-ms=10000
 ```
@@ -251,6 +281,8 @@ REDIS_URL=redis://localhost:6379
 SQLITE_PATH=/app/data/llm-shadow-proxy.sqlite
 PRIMARY_URL=https://primary.example.com/v1/mock
 CANDIDATE_URL=https://candidate.example.com/v1/mock
+APP_HTTP_CLIENT_CONNECT_TIMEOUT_MS=1000
+APP_HTTP_CLIENT_READ_TIMEOUT_MS=2000
 SHADOW_QUEUE_BACKEND=redis
 SHADOW_QUEUE_STREAM=llm-shadow:shadow-jobs
 SHADOW_QUEUE_GROUP=llm-shadow-proxy

@@ -1,8 +1,6 @@
 package com.example.llmshadow.config;
 
-import java.time.Duration;
-
-import org.springframework.beans.factory.annotation.Value;
+import com.example.llmshadow.config.properties.AppProperties;
 import org.springframework.boot.web.client.RestClientCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,15 +11,15 @@ import org.springframework.util.StringUtils;
 public class RestClientConfig {
 
     @Bean
-    public RestClientCustomizer timeoutCustomizer(@Value("${app.auth.api-key:}") String apiKey) {
+    public RestClientCustomizer timeoutCustomizer(AppProperties appProperties) {
         return restClientBuilder -> {
             SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-            requestFactory.setConnectTimeout(Duration.ofSeconds(1));
-            requestFactory.setReadTimeout(Duration.ofSeconds(2));
+            requestFactory.setConnectTimeout(appProperties.httpClient().connectTimeoutMs());
+            requestFactory.setReadTimeout(appProperties.httpClient().readTimeoutMs());
             restClientBuilder.requestFactory(requestFactory);
 
-            if (StringUtils.hasText(apiKey)) {
-                restClientBuilder.defaultHeader("X-API-Key", apiKey);
+            if (StringUtils.hasText(appProperties.auth().apiKey())) {
+                restClientBuilder.defaultHeader("X-API-Key", appProperties.auth().apiKey());
             }
         };
     }

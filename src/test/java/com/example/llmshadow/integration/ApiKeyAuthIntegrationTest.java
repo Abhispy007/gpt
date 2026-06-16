@@ -9,6 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -34,6 +35,9 @@ class ApiKeyAuthIntegrationTest {
         ResponseEntity<String> unauthorized = restTemplate.getForEntity("/api/mismatches", String.class);
         assertThat(unauthorized.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
 
+        ResponseEntity<String> unauthorizedMetrics = restTemplate.getForEntity("/metrics", String.class);
+        assertThat(unauthorizedMetrics.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("X-API-Key", "test-key");
@@ -45,5 +49,12 @@ class ApiKeyAuthIntegrationTest {
 
         assertThat(authorized.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(authorized.getBody()).contains("\"model\":\"primary\"");
+
+        ResponseEntity<String> authorizedMetrics = restTemplate.exchange(
+                "/metrics",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class);
+        assertThat(authorizedMetrics.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 }

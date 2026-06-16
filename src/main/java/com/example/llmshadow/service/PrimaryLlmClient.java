@@ -1,7 +1,7 @@
 package com.example.llmshadow.service;
 
+import com.example.llmshadow.config.properties.PrimaryProperties;
 import com.example.llmshadow.dto.LlmProxyRequest;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
@@ -11,21 +11,23 @@ public class PrimaryLlmClient {
 
     private final RestClient restClient;
     private final InternalEndpointResolver endpointResolver;
-    private final String primaryUrl;
+    private final PrimaryProperties primaryProperties;
 
     public PrimaryLlmClient(
             RestClient.Builder restClientBuilder,
             InternalEndpointResolver endpointResolver,
-            @Value("${primary.url:}") String primaryUrl) {
+            PrimaryProperties primaryProperties) {
         this.restClient = restClientBuilder.build();
         this.endpointResolver = endpointResolver;
-        this.primaryUrl = primaryUrl;
+        this.primaryProperties = primaryProperties;
     }
 
     public String complete(LlmProxyRequest request) {
         return restClient
                 .post()
-                .uri(StringUtils.hasText(primaryUrl) ? primaryUrl : endpointResolver.baseUrl() + "/mock/primary")
+                .uri(StringUtils.hasText(primaryProperties.url())
+                        ? primaryProperties.url()
+                        : endpointResolver.baseUrl() + "/mock/primary")
                 .body(request)
                 .retrieve()
                 .body(String.class);
