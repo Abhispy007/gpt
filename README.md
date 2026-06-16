@@ -32,6 +32,7 @@ flowchart LR
 POST /api/proxy
 GET  /api/mismatches
 GET  /metrics
+POST /auth/token
 POST /mock/primary
 POST /mock/candidate
 GET  /actuator/health
@@ -39,13 +40,50 @@ GET  /v3/api-docs
 GET  /swagger-ui/index.html
 ```
 
+## Authentication (API key and JWT)
+
+Protected endpoints accept **either**:
+
+1. **API key** — header `X-API-Key: <API_KEY>` (existing behavior, unchanged for DigitalOcean)
+2. **JWT Bearer token** — header `Authorization: Bearer <token>` (when `JWT_SECRET` is configured)
+
+### Option A: API key only (current DigitalOcean default)
+
+Set `API_KEY` in App Platform. Send the same value as `X-API-Key` on every request. No JWT setup required.
+
+### Option B: Exchange API key for JWT
+
+When both `API_KEY` and `JWT_SECRET` are set:
+
+```bash
+# 1) Exchange API key for JWT
+curl -s -X POST https://your-app.ondigitalocean.app/auth/token \
+  -H 'X-API-Key: your-api-key'
+
+# Response:
+# {"accessToken":"eyJ...","tokenType":"Bearer","expiresIn":3600}
+
+# 2) Use Bearer token on protected endpoints
+curl -s https://your-app.ondigitalocean.app/metrics \
+  -H 'Authorization: Bearer eyJ...'
+```
+
+JWT tokens expire after `JWT_EXPIRATION_SECONDS` (default `3600`). Your existing `X-API-Key` clients keep working without changes.
+
 ## Swagger
 
 ```text
 http://localhost:8080/swagger-ui/index.html
 ```
 
-If `API_KEY` is configured, click **Authorize** and enter the key. Swagger sends it as `X-API-Key`.
+Swagger shows two authorization options at the top:
+
+1. **Authorize → apiKey** — paste your `API_KEY` value (sent as `X-API-Key`)
+2. **Authorize → bearerAuth** — paste a JWT from `POST /auth/token` (sent as `Authorization: Bearer ...`)
+
+You only need one of them per request. For JWT in Swagger: call **POST /auth/token** first (with apiKey authorized), copy `accessToken`, then authorize **bearerAuth** with that token.
+
+If only `API_KEY` is configured (no `JWT_SECRET`), use **apiKey** only — same as before.
 
 ## Example Request
 
@@ -277,6 +315,9 @@ Useful environment variables:
 ```text
 PORT=8080
 API_KEY=your-secret
+JWT_SECRET=your-jwt-signing-secret-at-least-32-chars
+JWT_EXPIRATION_SECONDS=3600
+JWT_ISSUER=llm-shadow-proxy
 REDIS_URL=redis://localhost:6379
 SQLITE_PATH=/app/data/llm-shadow-proxy.sqlite
 PRIMARY_URL=https://primary.example.com/v1/mock
@@ -303,11 +344,32 @@ Recommended App Platform settings:
 - HTTP port: `8080`
 - Health check path: `/actuator/health`
 - Runtime environment variables:
-  - `API_KEY`
+  - `API_KEY` (required for auth; keep your existing value — nothing breaks)
+  - `JWT_SECRET` (optional; enables JWT Bearer auth — use at least 32 characters)
+  - `JWT_EXPIRATION_SECONDS` (optional; default `3600`)
+  - `JWT_ISSUER` (optional; default `llm-shadow-proxy`)
   - `REDIS_URL`
   - `SQLITE_PATH`
   - optional `PRIMARY_URL`
   - optional `CANDIDATE_URL`
+
+### DigitalOcean JWT rollout (backward compatible)
+
+Your deployed app at `https://walrus-app-vu7mk.ondigitalocean.app` already uses `API_KEY`. To add JWT **without breaking existing clients**:
+
+1. In App Platform → **Settings** → **Environment Variables**, add:
+   - `JWT_SECRET` = a new long random string (32+ characters, encrypted)
+   - Keep your existing `API_KEY` unchanged
+2. Redeploy the app (push this JWT code change first, then redeploy).
+3. Existing curl/Swagger clients using `X-API-Key` continue to work.
+4. New JWT flow:
+   ```bash
+   curl -s -X POST https://walrus-app-vu7mk.ondigitalocean.app/auth/token \
+     -H 'X-API-Key: YOUR_EXISTING_API_KEY'
+
+   curl -s https://walrus-app-vu7mk.ondigitalocean.app/metrics \
+     -H 'Authorization: Bearer <accessToken from above>'
+   ```
 
 Queue integration steps:
 
@@ -341,4 +403,4 @@ mvn -B test
 - The retry zset and dead-letter stream are intentionally simple.
 - Resilience4j circuit breaker state is still in-memory per app instance. For multiple production instances, use gateway/service-mesh circuit breaking or an explicitly shared breaker state.
 - SQLite is fine for demo mismatch storage, but multi-instance production deployments should use a shared database.
-- API key auth is simple. Production systems usually need identity, rotation, audit, and secret management.
+- API key auth remains supported for simple service-to-service access. JWT adds expiring Bearer tokens without removing API key support.

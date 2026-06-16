@@ -16,7 +16,28 @@ public record AppProperties(
 
     public record Auth(
             @DefaultValue("")
-            String apiKey) {
+            String apiKey,
+
+            @DefaultValue("")
+            String jwtSecret,
+
+            @DefaultValue("3600")
+            long jwtExpirationSeconds,
+
+            @DefaultValue("llm-shadow-proxy")
+            String jwtIssuer) {
+
+        public boolean apiKeyEnabled() {
+            return apiKey != null && !apiKey.isBlank();
+        }
+
+        public boolean jwtEnabled() {
+            return jwtSecret != null && !jwtSecret.isBlank();
+        }
+
+        public boolean authEnabled() {
+            return apiKeyEnabled() || jwtEnabled();
+        }
     }
 
     public record HttpClient(

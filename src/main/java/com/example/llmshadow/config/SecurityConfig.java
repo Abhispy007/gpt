@@ -1,7 +1,7 @@
 package com.example.llmshadow.config;
 
 import com.example.llmshadow.config.properties.AppProperties;
-import com.example.llmshadow.security.ApiKeyAuthFilter;
+import com.example.llmshadow.security.ApiAuthenticationFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -14,7 +14,6 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.util.StringUtils;
 
 @Configuration
 @EnableWebSecurity
@@ -24,7 +23,8 @@ public class SecurityConfig {
             "/actuator/health",
             "/v3/api-docs/**",
             "/swagger-ui/**",
-            "/swagger-ui.html"
+            "/swagger-ui.html",
+            "/auth/token"
     };
 
     private static final String[] PROTECTED_ENDPOINTS = {
@@ -38,7 +38,7 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
             AppProperties appProperties,
-            ApiKeyAuthFilter apiKeyAuthFilter) throws Exception {
+            ApiAuthenticationFilter apiAuthenticationFilter) throws Exception {
 
         http.csrf(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
@@ -46,7 +46,7 @@ public class SecurityConfig {
                 .logout(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
 
-        if (!StringUtils.hasText(appProperties.auth().apiKey())) {
+        if (!appProperties.auth().authEnabled()) {
             http.authorizeHttpRequests(authorize -> authorize.anyRequest().permitAll());
             return http.build();
         }
@@ -58,16 +58,18 @@ public class SecurityConfig {
                 .exceptionHandling(exception -> exception.authenticationEntryPoint((request, response, authException) -> {
                     response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                     response.setContentType("application/json");
-                    response.getWriter().write("{\"error\":\"missing or invalid API key\"}");
+                    response.getWriter().write("{\"error\":\"missing or invalid API key or Bearer token\"}");
                 }))
-                .addFilterBefore(apiKeyAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(apiAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
 
     @Bean
-    public FilterRegistrationBean<ApiKeyAuthFilter> apiKeyAuthFilterRegistration(ApiKeyAuthFilter apiKeyAuthFilter) {
-        FilterRegistrationBean<ApiKeyAuthFilter> registration = new FilterRegistrationBean<>(apiKeyAuthFilter);
+    public FilterRegistrationBean<ApiAuthenticationFilter> apiAuthenticationFilterRegistration(
+            ApiAuthenticationFilter apiAuthenticationFilter) {
+        FilterRegistrationBean<ApiAuthenticationFilter> registration =
+                new FilterRegistrationBean<>(apiAuthenticationFilter);
         registration.setEnabled(false);
         return registration;
     }
