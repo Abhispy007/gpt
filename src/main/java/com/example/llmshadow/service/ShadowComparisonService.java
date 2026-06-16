@@ -6,6 +6,9 @@ import com.example.llmshadow.persistence.MismatchRepository;
 import com.example.llmshadow.queue.QueuedShadowJob;
 import com.example.llmshadow.queue.ShadowJobQueue;
 import com.example.llmshadow.service.JsonComparisonService.JsonComparisonResult;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.time.Instant;
 import java.util.concurrent.RejectedExecutionException;
 import org.slf4j.MDC;
@@ -18,7 +21,9 @@ import org.springframework.stereotype.Service;
 public class ShadowComparisonService {
 
     private final CandidateLlmClient candidateLlmClient;
-    private final CandidateCircuitBreaker circuitBreaker;
+    private final CircuitBreaker candidateCircuitBreaker;
+    private final boolean circuitBreakerEnabled;
+    private final long circuitBreakerOpenDurationMs;
     private final JsonComparisonService jsonComparisonService;
     private final MismatchLogger mismatchLogger;
     private final MismatchRepository mismatchRepository;
@@ -31,7 +36,7 @@ public class ShadowComparisonService {
 
     public ShadowComparisonService(
             CandidateLlmClient candidateLlmClient,
-            CandidateCircuitBreaker circuitBreaker,
+            CircuitBreakerRegistry circuitBreakerRegistry,
             JsonComparisonService jsonComparisonService,
             MismatchLogger mismatchLogger,
             MismatchRepository mismatchRepository,
@@ -39,10 +44,14 @@ public class ShadowComparisonService {
             ShadowJobQueue shadowJobQueue,
             @Value("${shadow.retry.max-attempts:3}") int maxAttempts,
             @Value("${shadow.retry.backoff-ms:1000}") long retryBackoffMs,
+            @Value("${shadow.circuit-breaker.enabled:true}") boolean circuitBreakerEnabled,
+            @Value("${shadow.circuit-breaker.open-duration-ms:10000}") long circuitBreakerOpenDurationMs,
             @Value("${shadow.queue.batch-size:10}") int batchSize,
             ThreadPoolTaskExecutor shadowExecutor) {
         this.candidateLlmClient = candidateLlmClient;
-        this.circuitBreaker = circuitBreaker;
+        this.candidateCircuitBreaker = circuitBreakerRegistry.circuitBreaker("candidate");
+        this.circuitBreakerEnabled = circuitBreakerEnabled;
+        this.circuitBreakerOpenDurationMs = circuitBreakerOpenDurationMs;
         this.jsonComparisonService = jsonComparisonService;
         this.mismatchLogger = mismatchLogger;
         this.mismatchRepository = mismatchRepository;
@@ -91,24 +100,20 @@ public class ShadowComparisonService {
     }
 
     private void compare(QueuedShadowJob job) {
-        if (!circuitBreaker.allowRequest()) {
-            shadowJobQueue.retry(job, job.attempts(), circuitBreaker.openUntil(), "Candidate circuit breaker open");
-            mismatchLogger.logShadowError(job.requestId(), "CircuitOpen", "Candidate circuit breaker is open");
-            return;
-        }
-
         int currentAttempt = job.attempts() + 1;
         String candidateRawResponse;
         try {
-            candidateRawResponse = candidateLlmClient.complete(job.request());
+            candidateRawResponse = completeCandidate(job);
+        } catch (CallNotPermittedException ex) {
+            retryCircuitOpen(job);
+            mismatchLogger.logShadowError(job.requestId(), "CircuitOpen", "Candidate circuit breaker is open");
+            return;
         } catch (RuntimeException ex) {
-            circuitBreaker.recordFailure();
             retryOrFail(job, currentAttempt, ex.getClass().getSimpleName() + ": " + safeMessage(ex));
             mismatchLogger.logShadowError(job.requestId(), ex.getClass().getSimpleName(), safeMessage(ex));
             return;
         }
 
-        circuitBreaker.recordSuccess();
         JsonComparisonResult result = jsonComparisonService.compareOutputs(job.primaryRawResponse(), candidateRawResponse);
         if (!result.comparable()) {
             retryOrFail(job, currentAttempt, "JSON extraction failed for " + result.failedSource() + ": " + result.error());
@@ -125,6 +130,22 @@ public class ShadowComparisonService {
         }
 
         shadowJobQueue.acknowledge(job);
+    }
+
+    private String completeCandidate(QueuedShadowJob job) {
+        if (!circuitBreakerEnabled) {
+            return candidateLlmClient.complete(job.request());
+        }
+
+        return candidateCircuitBreaker.executeSupplier(() -> candidateLlmClient.complete(job.request()));
+    }
+
+    private void retryCircuitOpen(QueuedShadowJob job) {
+        shadowJobQueue.retry(
+                job,
+                job.attempts(),
+                Instant.now().plusMillis(circuitBreakerOpenDurationMs),
+                "Candidate circuit breaker open");
     }
 
     private void retryOrFail(QueuedShadowJob job, int currentAttempt, String error) {

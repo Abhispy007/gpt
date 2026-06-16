@@ -160,7 +160,7 @@ shadow.retry.max-attempts=3
 shadow.retry.backoff-ms=1000
 ```
 
-The lightweight circuit breaker opens after repeated Candidate failures:
+Candidate calls are protected with a Resilience4j circuit breaker named `candidate`. The assignment-facing settings are:
 
 ```properties
 shadow.circuit-breaker.enabled=true
@@ -168,7 +168,16 @@ shadow.circuit-breaker.failure-threshold=3
 shadow.circuit-breaker.open-duration-ms=10000
 ```
 
-When the circuit is open, the job is moved to the Redis retry zset until the open period expires. After max attempts, the job is written to the Redis dead-letter stream.
+Those values feed the Resilience4j instance:
+
+```properties
+resilience4j.circuitbreaker.instances.candidate.sliding-window-type=COUNT_BASED
+resilience4j.circuitbreaker.instances.candidate.minimum-number-of-calls=3
+resilience4j.circuitbreaker.instances.candidate.failure-rate-threshold=100
+resilience4j.circuitbreaker.instances.candidate.wait-duration-in-open-state=10000ms
+```
+
+When Resilience4j rejects a Candidate call because the circuit is open, the job is moved to the Redis retry zset until the open period expires. After max attempts, the job is written to the Redis dead-letter stream.
 
 ## Mismatch Storage
 
@@ -298,6 +307,6 @@ mvn -B test
 
 - Redis Streams is lightweight and good for this assignment, but a production system may want managed Kafka, SQS, or a dedicated job queue depending on ordering, replay, and throughput needs.
 - The retry zset and dead-letter stream are intentionally simple.
-- The circuit breaker is in-memory per app instance.
+- Resilience4j circuit breaker state is still in-memory per app instance. For multiple production instances, use gateway/service-mesh circuit breaking or an explicitly shared breaker state.
 - SQLite is fine for demo mismatch storage, but multi-instance production deployments should use a shared database.
 - API key auth is simple. Production systems usually need identity, rotation, audit, and secret management.
