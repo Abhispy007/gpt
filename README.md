@@ -112,6 +112,36 @@ The queued job contains only:
 
 It does not contain servlet request or response objects, so the background job does not depend on the original HTTP connection staying open.
 
+## Client Disconnect Safety
+
+The background request context survives client disconnects because the app copies all required data into a standalone `ShadowComparisonJob` before returning from `/api/proxy`.
+
+The copied job contains:
+
+- generated request id
+- validated request DTO
+- raw Primary response
+- creation timestamp
+
+The job does not contain:
+
+- `HttpServletRequest`
+- `HttpServletResponse`
+- controller thread state
+- request input stream
+- client socket
+
+After the Primary model responds, `ProxyController` creates the copied job and submits it to the queue:
+
+```java
+ShadowComparisonJob job = new ShadowComparisonJob(requestId, request, primaryRawResponse, Instant.now());
+shadowComparisonService.submit(job);
+```
+
+`RedisShadowJobQueue` serializes that copied job into Redis Streams. Once Redis accepts the message, the Candidate comparison can run later on a background thread even if the caller has already disconnected.
+
+This is tested by `shadowJobPersistsAndRunsEvenWhenClientDisconnectsBeforeReadingResponse`, which opens a raw socket, sends the full HTTP request, closes the socket before reading the response, and still verifies that a mismatch record is written.
+
 Queue pieces:
 
 - Main queue: Redis Stream, configured by `SHADOW_QUEUE_STREAM`
