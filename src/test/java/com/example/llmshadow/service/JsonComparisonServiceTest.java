@@ -62,6 +62,7 @@ class JsonComparisonServiceTest {
 
         assertThat(result.comparable()).isTrue();
         assertThat(result.matched()).isTrue();
+        assertThat(result.primaryHash()).isEqualTo(result.candidateHash());
     }
 
     @Test
@@ -72,5 +73,30 @@ class JsonComparisonServiceTest {
 
         assertThat(result.comparable()).isTrue();
         assertThat(result.matched()).isFalse();
+        assertThat(result.primaryHash()).isNotEqualTo(result.candidateHash());
+    }
+
+    @Test
+    void trimsTextValuesBeforeHashComparison() {
+        JsonComparisonResult result = service.compareOutputs(
+                "{\"output\":{\"answer\":\" gold \",\"metadata\":{\"reason\":\" approved \"}}}",
+                "{\"output\":{\"metadata\":{\"reason\":\"approved\"},\"answer\":\"gold\"}}");
+
+        assertThat(result.comparable()).isTrue();
+        assertThat(result.matched()).isTrue();
+        assertThat(result.primaryHash()).isEqualTo(result.candidateHash());
+        assertThat(result.primaryJson().get("answer").asText()).isEqualTo("gold");
+    }
+
+    @Test
+    void hashesCanonicalPayloadInsteadOfWrapperMetadata() {
+        JsonComparisonResult result = service.compareOutputs(
+                "{\"model\":\"primary\",\"output\":{\"tier\":\"gold\"}}",
+                "{\"model\":\"candidate\",\"output\":{\"tier\":\"gold\"}}");
+
+        assertThat(result.comparable()).isTrue();
+        assertThat(result.matched()).isTrue();
+        assertThat(result.primaryHash()).isEqualTo(result.candidateHash());
+        assertThat(result.primaryHash()).hasSize(64);
     }
 }

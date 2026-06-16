@@ -3,7 +3,14 @@ package com.example.llmshadow.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Service;
@@ -32,7 +39,18 @@ public class JsonComparisonService {
 
         JsonNode primaryOutput = comparablePayload(primary.json());
         JsonNode candidateOutput = comparablePayload(candidate.json());
-        return JsonComparisonResult.compared(primaryOutput.equals(candidateOutput), primaryOutput, candidateOutput);
+        JsonNode normalizedPrimary = normalize(primaryOutput);
+        JsonNode normalizedCandidate = normalize(candidateOutput);
+        String primaryCanonical = canonicalJson(normalizedPrimary);
+        String candidateCanonical = canonicalJson(normalizedCandidate);
+        String primaryHash = sha256(primaryCanonical);
+        String candidateHash = sha256(candidateCanonical);
+        return JsonComparisonResult.compared(
+                primaryHash.equals(candidateHash),
+                normalizedPrimary,
+                normalizedCandidate,
+                primaryHash,
+                candidateHash);
     }
 
     public JsonExtractionResult extractJson(String raw) {
@@ -64,6 +82,50 @@ public class JsonComparisonService {
             return jsonNode.get("output");
         }
         return jsonNode;
+    }
+
+    private JsonNode normalize(JsonNode jsonNode) {
+        if (jsonNode == null || jsonNode.isNull()) {
+            return objectMapper.nullNode();
+        }
+
+        if (jsonNode.isObject()) {
+            ObjectNode normalized = objectMapper.createObjectNode();
+            TreeMap<String, JsonNode> sortedFields = new TreeMap<>();
+            jsonNode.fields().forEachRemaining(entry -> sortedFields.put(entry.getKey(), entry.getValue()));
+            sortedFields.forEach((fieldName, fieldValue) -> normalized.set(fieldName, normalize(fieldValue)));
+            return normalized;
+        }
+
+        if (jsonNode.isArray()) {
+            ArrayNode normalized = objectMapper.createArrayNode();
+            jsonNode.forEach(element -> normalized.add(normalize(element)));
+            return normalized;
+        }
+
+        if (jsonNode.isTextual()) {
+            return objectMapper.getNodeFactory().textNode(jsonNode.textValue().trim());
+        }
+
+        return jsonNode;
+    }
+
+    private String canonicalJson(JsonNode jsonNode) {
+        try {
+            return objectMapper.writeValueAsString(jsonNode);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Could not canonicalize JSON", ex);
+        }
+    }
+
+    private String sha256(String canonicalJson) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(canonicalJson.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 is not available", ex);
+        }
     }
 
     private Optional<JsonNode> parse(String raw) {
@@ -144,15 +206,22 @@ public class JsonComparisonService {
             boolean matched,
             JsonNode primaryJson,
             JsonNode candidateJson,
+            String primaryHash,
+            String candidateHash,
             String failedSource,
             String error) {
 
-        public static JsonComparisonResult compared(boolean matched, JsonNode primaryJson, JsonNode candidateJson) {
-            return new JsonComparisonResult(true, matched, primaryJson, candidateJson, null, null);
+        public static JsonComparisonResult compared(
+                boolean matched,
+                JsonNode primaryJson,
+                JsonNode candidateJson,
+                String primaryHash,
+                String candidateHash) {
+            return new JsonComparisonResult(true, matched, primaryJson, candidateJson, primaryHash, candidateHash, null, null);
         }
 
         public static JsonComparisonResult extractionFailure(String failedSource, String error) {
-            return new JsonComparisonResult(false, false, null, null, failedSource, error);
+            return new JsonComparisonResult(false, false, null, null, null, null, failedSource, error);
         }
     }
 }

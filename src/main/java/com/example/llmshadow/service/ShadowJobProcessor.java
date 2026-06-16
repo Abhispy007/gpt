@@ -74,7 +74,12 @@ public class ShadowJobProcessor {
         shadowMetricsService.recordCompletedComparison(job.requestId(), result);
 
         if (!result.matched()) {
-            mismatchLogger.logMismatch(job.requestId(), result.primaryJson(), result.candidateJson());
+            mismatchLogger.logMismatch(
+                    job.requestId(),
+                    result.primaryJson(),
+                    result.candidateJson(),
+                    result.primaryHash(),
+                    result.candidateHash());
         }
 
         shadowJobQueue.acknowledge(job);

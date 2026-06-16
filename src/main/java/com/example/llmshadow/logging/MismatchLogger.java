@@ -21,10 +21,17 @@ public class MismatchLogger {
         this.redactionService = redactionService;
     }
 
-    public void logMismatch(String requestId, JsonNode primaryJson, JsonNode candidateJson) {
+    public void logMismatch(
+            String requestId,
+            JsonNode primaryJson,
+            JsonNode candidateJson,
+            String primaryHash,
+            String candidateHash) {
         log.warn(
-                "event=llm_shadow_mismatch requestId={} primaryJson={} candidateJson={}",
+                "event=llm_shadow_mismatch requestId={} primaryHash={} candidateHash={} primaryJson={} candidateJson={}",
                 requestId,
+                primaryHash,
+                candidateHash,
                 compact(redactionService.redact(primaryJson)),
                 compact(redactionService.redact(candidateJson)));
     }

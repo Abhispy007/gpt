@@ -7,23 +7,31 @@ This version keeps SQLite only for mismatch storage. Shadow work is queued separ
 ## Architecture
 
 ```mermaid
-flowchart LR
-  Client["Client POST /api/proxy"] --> Proxy["ProxyController"]
-  Proxy --> Primary["Primary LLM"]
-  Primary --> Proxy
-  Proxy --> Response["Return Primary Response"]
+flowchart TB
+  Client["Client / Swagger / Caller"] --> Edge["DigitalOcean Edge Routing or Load Balancer"]
+  Edge --> Security["Spring Security: API Key or JWT"]
+  Security --> Guards["RequestSizeFilter + RequestValidationService + RateLimiter + BackpressureService"]
+  Guards --> Proxy["ProxyController POST /api/proxy"]
 
-  Proxy --> Queue["Redis Stream shadow queue"]
-  Queue --> Worker["Scheduled queue drain"]
-  Worker --> Async["@Async ShadowJobProcessor"]
-  Async --> Executor["shadowTaskExecutor"]
-  Executor --> Candidate["Candidate LLM @CircuitBreaker"]
-  Candidate --> Compare["JSON Extract + Compare"]
-  Compare -->|Mismatch| Store["SQLite mismatches"]
-  Compare -->|Mismatch| Logs["Redacted Logs"]
+  Proxy --> Primary["Primary LLM mock or PRIMARY_URL"]
+  Primary --> Proxy
+  Proxy --> Response["Return Primary response synchronously"]
+
+  Proxy -. "copied ShadowComparisonJob" .-> Queue["Redis Streams shadow queue"]
+  Proxy -. "if Redis publish fails" .-> Outbox["SQLite shadow_outbox buffer"]
+  Outbox --> Drainer["Scheduled queue drainer"]
+  Queue --> Drainer
+  Drainer --> Async["@Async ShadowJobProcessor"]
+  Async --> Executor["bounded shadowTaskExecutor"]
+  Executor --> Candidate["Candidate LLM mock or CANDIDATE_URL @CircuitBreaker"]
+  Candidate --> Compare["Extract JSON -> normalize -> SHA-256 hash compare"]
+  Compare -->|Match| Metrics["SQLite metrics"]
+  Compare -->|Mismatch| Store["SQLite redacted mismatches"]
+  Compare -->|Mismatch| Logs["Redacted logs with hashes"]
   Compare -->|Failure| Retry["Redis retry zset"]
   Retry --> Queue
-  Compare -->|Max Attempts| DLQ["Redis dead-letter stream"]
+  Queue -->|stale pending recovery| Drainer
+  Compare -->|Max attempts| DLQ["Redis dead-letter stream"]
 ```
 
 ## API
@@ -280,7 +288,21 @@ resilience4j.circuitbreaker.instances.candidate.wait-duration-in-open-state=1000
 
 When Resilience4j rejects a Candidate call because the circuit is open, the job is moved to the Redis retry zset until the open period expires. After max attempts, the job is written to the Redis dead-letter stream.
 
-## Mismatch Storage
+## Output Comparison
+
+Model responses are compared through a deterministic exact-match path:
+
+1. Extract the first valid JSON object or array from the Primary and Candidate responses.
+2. Compare only the `output` field when the wrapper contains one, so `model=primary` versus `model=candidate` does not create a false mismatch.
+3. Normalize the comparable JSON:
+   - sort object fields recursively
+   - preserve array order
+   - trim string leaf values
+4. Serialize the normalized JSON into a canonical string.
+5. Hash the canonical string with SHA-256.
+6. Treat the outputs as a match when the hashes are identical.
+
+This keeps comparison cheap and stable for deterministic outputs. It also means object field order and harmless leading/trailing text whitespace do not produce false mismatches.
 
 Mismatches are stored in SQLite:
 
@@ -297,7 +319,7 @@ shadow.redaction.sensitive-keys=customerId,email,phone,ssn,token,apiKey,password
 The app still logs:
 
 ```text
-event=llm_shadow_mismatch requestId=... primaryJson=... candidateJson=...
+event=llm_shadow_mismatch requestId=... primaryHash=... candidateHash=... primaryJson=... candidateJson=...
 ```
 
 ## Local Setup
@@ -381,6 +403,8 @@ If `PRIMARY_URL` or `CANDIDATE_URL` are blank, the app uses the internal mock en
 
 Use DigitalOcean App Platform for the Spring Boot app and DigitalOcean Managed Caching for Valkey as the Redis-compatible queue service.
 
+App Platform already provides managed ingress for the app. If you increase the instance count for the web service, DigitalOcean routes traffic across those app instances automatically.
+
 Recommended App Platform settings:
 
 - Type: Web Service
@@ -436,6 +460,39 @@ event=shadow_dead_lettered requestId=...
 For App Platform database binding, DigitalOcean also supports bindable variables for managed databases. If the Valkey component is named `queue`, set `REDIS_URL` from the connection string bindable variable if one is available, or compose it from the host, port, username, and password values.
 
 SQLite note: App Platform containers are replaceable. If you need mismatch records to survive redeploys, attach persistent storage and set `SQLITE_PATH` to the mounted path. If this is only a demo, runtime logs plus ephemeral SQLite are acceptable.
+
+### DigitalOcean Load Balancer
+
+Use the separate DigitalOcean Load Balancer product when you deploy this app on Droplets or DigitalOcean Kubernetes. For the current App Platform deployment, prefer App Platform's built-in routing and scaling unless you move off App Platform.
+
+Droplet-based integration:
+
+1. Build and run the Docker image on two or more Droplets in the same region.
+2. Give each Droplet the same runtime environment:
+   - `API_KEY`
+   - `JWT_SECRET` if using JWT
+   - shared `REDIS_URL`
+   - shared external `PRIMARY_URL` and `CANDIDATE_URL` if you stop using internal mocks
+3. Put the Droplets behind a DigitalOcean Load Balancer.
+4. Add a forwarding rule:
+   - protocol: HTTP or HTTPS
+   - entry port: `80` or `443`
+   - target protocol: HTTP
+   - target port: `8080`
+5. Configure health checks:
+   - path: `/actuator/health`
+   - healthy status: HTTP `200`
+6. Point your domain at the Load Balancer IP.
+
+Kubernetes integration:
+
+1. Push the Docker image to a registry.
+2. Create a Deployment for the Spring Boot container.
+3. Create a Kubernetes `Service` with `type: LoadBalancer`.
+4. DigitalOcean Kubernetes provisions a DigitalOcean Load Balancer for that service.
+5. Keep Redis/Valkey external and shared so any pod can publish and consume shadow jobs.
+
+Multi-instance warning: this app can run behind a load balancer, but SQLite mismatch storage is local to each app instance unless you mount shared storage or replace SQLite with a shared database. Redis Streams is already shared, so the shadow queue is the right cross-instance coordination point.
 
 ## CI
 
