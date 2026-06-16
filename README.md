@@ -93,6 +93,171 @@ You only need one of them per request. For JWT in Swagger: call **POST /auth/tok
 
 If only `API_KEY` is configured (no `JWT_SECRET`), use **apiKey** only — same as before.
 
+## Request flow (step by step)
+
+One request through the app, from click to stored result:
+
+```text
+YOU click POST /api/proxy
+  │
+  ├─ Step 1-5:  App calls Primary
+  ├─ Step 6-7:  App saves job to Redis
+  └─ Step 8:    App returns Primary answer to YOU  ← you see this now
+
+     (wait a few seconds — shadow work is async)
+
+  ├─ Step 9-11: Timer picks job from Redis, starts background worker
+  ├─ Step 12:   Worker calls Candidate
+  ├─ Step 13:   Worker compares answers
+  ├─ Step 14:   Updates counter (+ saves mismatch if different)
+  └─ Step 15:   Marks job done in Redis
+
+YOU click GET /metrics or GET /api/mismatches
+  │
+  └─ Step 16-17: App reads results from SQLite  ← you see this now
+```
+
+### What each step does
+
+**Part A — synchronous (you wait for this)**
+
+| Step | What happens |
+|---|---|
+| 1 | Request arrives (Swagger sends JSON). |
+| 2 | Auth check (API key or JWT). |
+| 3 | Validation (size, prompt length, etc.). |
+| 4 | App generates a `requestId`. |
+| 5 | App calls **Primary** (`PRIMARY_URL` or internal `/mock/primary`). |
+| 6 | App copies `requestId`, request body, and Primary raw response into a shadow job. |
+| 7 | App publishes the job to **Redis Streams**. |
+| 8 | App returns Primary's JSON to the caller. **You are done waiting.** |
+
+**Part B — asynchronous (runs in the background)**
+
+| Step | What happens |
+|---|---|
+| 9 | Scheduled drainer wakes (~every 50ms) and polls Redis. |
+| 10 | Drainer picks up the job. |
+| 11 | Job is handed to a background worker thread. |
+| 12 | Worker calls **Candidate** (`CANDIDATE_URL` or internal `/mock/candidate`). |
+| 13 | Worker extracts JSON, normalizes both responses, and compares them. |
+| 14 | **Match** → increment metrics counter only. **Mismatch** → increment counter + save redacted JSON to SQLite. |
+| 15 | Worker acknowledges the job in Redis. |
+
+**Part C — when you inspect results**
+
+| Step | What happens |
+|---|---|
+| 16 | `GET /metrics` reads aggregate counters from SQLite (`totalComparisons`, `matches`, `mismatches`, `matchRatePercentage`). |
+| 17 | `GET /api/mismatches` reads recent mismatch rows from SQLite (empty when everything matched). |
+
+**Latency note:** Primary responds immediately. Shadow comparison usually finishes **1–3 seconds** later on DigitalOcean (Redis poll interval + managed Valkey RTT + Candidate HTTP call + SQLite write). Wait **3–5 seconds** after `POST /api/proxy` before checking `/metrics` or `/api/mismatches`.
+
+## Swagger demo
+
+Use this flow when presenting the app in Swagger UI. It assumes background shadow latency — pause between the proxy call and the follow-up checks.
+
+### Before you start
+
+1. Open Swagger:
+   - Local: `http://localhost:8080/swagger-ui/index.html`
+   - DigitalOcean: `https://walrus-app-vu7mk.ondigitalocean.app/swagger-ui/index.html`
+2. Click **Authorize** (top right) → **apiKey** → paste your `API_KEY` → **Authorize** → **Close**.
+3. Run **GET /actuator/health** → confirm `200` and `"status":"UP"`.
+
+Auth is configured globally in **Authorize**, not under each endpoint's Parameters tab.
+
+### Demo script
+
+#### 1. Happy path — match
+
+1. Open **Proxy → POST /api/proxy** → **Try it out**.
+2. Use this body:
+
+```json
+{
+  "prompt": "Return customer tier",
+  "input": { "customerId": "demo-match" },
+  "forceMismatch": false,
+  "forceCandidateError": false,
+  "candidateDelayMs": 0,
+  "stream": false
+}
+```
+
+3. **Execute** → show `200`, Primary body with `"tier":"gold"`, and `x-request-id` in response headers.
+4. **Wait 5 seconds** (shadow job runs in the background).
+5. Open **Metrics → GET /metrics** → **Execute** → show `totalComparisons` and `matches` increased; note `updatedAt` changed.
+6. Open **Mismatches → GET /api/mismatches** → **Execute** → no new row expected (matches are not stored).
+
+#### 2. Forced mismatch
+
+1. Back to **POST /api/proxy** → **Try it out**.
+2. Use this body:
+
+```json
+{
+  "prompt": "Return customer tier",
+  "input": { "customerId": "demo-mismatch" },
+  "forceMismatch": true,
+  "forceCandidateError": false,
+  "candidateDelayMs": 0,
+  "stream": false
+}
+```
+
+3. **Execute** → still `200` and Primary still shows `"tier":"gold"` (customer always sees Primary).
+4. **Wait 5 seconds**.
+5. **GET /api/mismatches** → show newest row: Primary `gold` vs Candidate `silver`.
+6. **GET /metrics** → show `mismatches` increased and `matchRatePercentage` dropped.
+
+#### 3. Candidate failure (optional)
+
+1. **POST /api/proxy** with:
+
+```json
+{
+  "prompt": "Return customer tier",
+  "input": { "customerId": "demo-error" },
+  "forceMismatch": false,
+  "forceCandidateError": true,
+  "candidateDelayMs": 0,
+  "stream": false
+}
+```
+
+2. **Execute** → customer still gets `200` from Primary.
+3. Shadow retries internally; metrics may not increment until a comparison completes.
+
+### Suggested click order
+
+```text
+1. Authorize (apiKey)
+2. GET /actuator/health
+3. POST /api/proxy          (forceMismatch: false)  → show 200 + gold
+   … wait 5 sec …
+4. GET /metrics             → matches +1
+5. GET /api/mismatches      → no new row
+
+6. POST /api/proxy          (forceMismatch: true)   → show 200 + gold still
+   … wait 5 sec …
+7. GET /api/mismatches      → gold vs silver row
+8. GET /metrics             → mismatches +1
+
+9. (optional) POST /api/proxy (forceCandidateError: true) → still 200
+```
+
+### Demo pitfalls
+
+| Symptom | Likely cause |
+|---|---|
+| 401 on `/api/proxy`, `/metrics`, or `/api/mismatches` | Not authorized — use **Authorize → apiKey**. |
+| Metrics unchanged right after proxy | Checked too soon — wait 5 seconds; confirm `updatedAt` moved. |
+| Proxy shows gold but no mismatch row | Shadow still running, or `forceMismatch` not `true` in the body. |
+| `totalComparisons: 1`, `mismatches: 0` after forceMismatch | Only one job finished so far and it matched — wait longer or run the mismatch request again. |
+
+**Sanity check:** **Mock LLMs → POST /mock/candidate** with `"forceMismatch": true` should return `"tier":"silver"` directly (bypasses the queue).
+
 ## Example Request
 
 ```bash
